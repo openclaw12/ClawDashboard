@@ -38,7 +38,18 @@ import {
   IntegrationConfig,
 } from "@/lib/types";
 
-const AGENT_URL = "ws://localhost:9900";
+const AGENT_STORAGE_KEY = "claw_agent_url";
+const DEFAULT_AGENT_URL = "ws://localhost:9900";
+
+function getAgentUrl(): string {
+  if (typeof window === "undefined") return DEFAULT_AGENT_URL;
+  return localStorage.getItem(AGENT_STORAGE_KEY) || DEFAULT_AGENT_URL;
+}
+
+function saveAgentUrl(url: string) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(AGENT_STORAGE_KEY, url);
+}
 
 const viewTitles: Record<string, string> = {
   dashboard: "Dashboard",
@@ -65,6 +76,7 @@ export default function Home() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [productivity, setProductivity] = useState<ProductivityData[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationConfig[]>([]);
+  const [agentUrl, setAgentUrl] = useState(DEFAULT_AGENT_URL);
 
   useEffect(() => {
     setTasks(getDefaultTasks());
@@ -74,6 +86,7 @@ export default function Home() {
     setNotifications(getDefaultNotifications());
     setProductivity(getDefaultProductivity());
     setIntegrations(getDefaultIntegrations());
+    setAgentUrl(getAgentUrl());
     setMounted(true);
   }, []);
 
@@ -105,6 +118,11 @@ export default function Home() {
   const handleIntegrationsUpdate = useCallback((updated: IntegrationConfig[]) => {
     setIntegrations(updated);
     saveIntegrations(updated);
+  }, []);
+
+  const handleAgentUrlUpdate = useCallback((url: string) => {
+    setAgentUrl(url);
+    saveAgentUrl(url);
   }, []);
 
   const unreadNotifications = notifications.filter((n) => !n.read).length;
@@ -148,10 +166,10 @@ export default function Home() {
             />
           )}
           {activeView === "desktop" && (
-            <LiveDesktopView agentUrl={AGENT_URL} />
+            <LiveDesktopView agentUrl={agentUrl} />
           )}
           {activeView === "botcontrol" && (
-            <BotControlPanel agentUrl={AGENT_URL} />
+            <BotControlPanel agentUrl={agentUrl} />
           )}
           {activeView === "tasks" && (
             <TaskManager tasks={tasks} onUpdate={handleTasksUpdate} />
@@ -178,6 +196,8 @@ export default function Home() {
             <SettingsPanel
               integrations={integrations}
               onUpdate={handleIntegrationsUpdate}
+              agentUrl={agentUrl}
+              onAgentUrlUpdate={handleAgentUrlUpdate}
             />
           )}
         </main>

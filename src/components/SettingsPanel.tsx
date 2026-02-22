@@ -1,13 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { Save, ExternalLink, Check } from "lucide-react";
+import { Save, ExternalLink, Check, Monitor, Wifi, WifiOff, Loader2 } from "lucide-react";
 import { IntegrationConfig } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface SettingsPanelProps {
   integrations: IntegrationConfig[];
   onUpdate: (integrations: IntegrationConfig[]) => void;
+  agentUrl: string;
+  onAgentUrlUpdate: (url: string) => void;
 }
 
 const integrationIcons: Record<string, string> = {
@@ -26,8 +28,47 @@ const integrationColors: Record<string, string> = {
   GitHub: "bg-gray-600",
 };
 
-export default function SettingsPanel({ integrations, onUpdate }: SettingsPanelProps) {
+export default function SettingsPanel({ integrations, onUpdate, agentUrl, onAgentUrlUpdate }: SettingsPanelProps) {
   const [saved, setSaved] = useState(false);
+  const [urlInput, setUrlInput] = useState(agentUrl);
+  const [agentStatus, setAgentStatus] = useState<"unknown" | "checking" | "connected" | "error">("unknown");
+  const [agentInfo, setAgentInfo] = useState<string>("");
+
+  const testConnection = async () => {
+    setAgentStatus("checking");
+    try {
+      // Convert ws:// to http:// for the health check
+      const httpUrl = urlInput.replace(/^ws(s?):\/\//, "http$1://");
+      const res = await fetch(`${httpUrl}/health`, { signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        const data = await res.json();
+        setAgentStatus("connected");
+        setAgentInfo(`${data.agent} v${data.version} on ${data.hostname} (${data.platform}, capture: ${data.captureMethod})`);
+      } else {
+        setAgentStatus("error");
+        setAgentInfo("Agent returned non-OK response");
+      }
+    } catch {
+      setAgentStatus("error");
+      setAgentInfo("Cannot reach agent. Is it running?");
+    }
+  };
+
+  const saveAgentUrl = () => {
+    // Normalize: ensure it's a ws:// URL
+    let url = urlInput.trim();
+    if (url.startsWith("https://")) {
+      url = url.replace("https://", "wss://");
+    } else if (url.startsWith("http://")) {
+      url = url.replace("http://", "ws://");
+    } else if (!url.startsWith("ws://") && !url.startsWith("wss://")) {
+      url = `wss://${url}`;
+    }
+    // Remove trailing slash
+    url = url.replace(/\/$/, "");
+    setUrlInput(url);
+    onAgentUrlUpdate(url);
+  };
 
   const toggleIntegration = (index: number) => {
     const updated = [...integrations];
@@ -48,6 +89,77 @@ export default function SettingsPanel({ integrations, onUpdate }: SettingsPanelP
 
   return (
     <div className="space-y-6 animate-fade-in max-w-3xl">
+      {/* Agent Connection */}
+      <div>
+        <h2 className="text-base font-semibold text-white mb-4">ClawBot Agent Connection</h2>
+        <div className="bg-[#1e293b] rounded-xl border border-[#334155] p-5 space-y-4">
+          <div>
+            <label className="text-xs text-slate-400 mb-1 block">
+              Agent URL (WebSocket)
+            </label>
+            <p className="text-xs text-slate-500 mb-2">
+              Enter your Cloudflare Tunnel URL or local address. The agent runs on your Raspberry Pi.
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                placeholder="wss://your-tunnel-id.trycloudflare.com"
+                value={urlInput}
+                onChange={(e) => { setUrlInput(e.target.value); setAgentStatus("unknown"); }}
+                className="flex-1 bg-[#0f172a] border border-[#334155] rounded-lg px-4 py-2 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={testConnection}
+                disabled={agentStatus === "checking"}
+                className="px-4 py-2 bg-[#334155] hover:bg-[#475569] disabled:opacity-50 text-white text-sm rounded-lg transition-colors whitespace-nowrap"
+              >
+                {agentStatus === "checking" ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  "Test"
+                )}
+              </button>
+              <button
+                onClick={saveAgentUrl}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+
+          {agentStatus !== "unknown" && agentStatus !== "checking" && (
+            <div className={cn(
+              "flex items-start gap-2 p-3 rounded-lg text-sm",
+              agentStatus === "connected" ? "bg-green-500/10 border border-green-500/20" : "bg-red-500/10 border border-red-500/20"
+            )}>
+              {agentStatus === "connected" ? (
+                <Wifi className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
+              ) : (
+                <WifiOff className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
+              )}
+              <div>
+                <p className={agentStatus === "connected" ? "text-green-400" : "text-red-400"}>
+                  {agentStatus === "connected" ? "Connected!" : "Connection failed"}
+                </p>
+                <p className="text-xs text-slate-400 mt-0.5">{agentInfo}</p>
+              </div>
+            </div>
+          )}
+
+          <div className="bg-[#0f172a] rounded-lg p-3 border border-[#334155]">
+            <p className="text-xs font-medium text-slate-300 mb-2">Quick Setup (Raspberry Pi)</p>
+            <ol className="text-xs text-slate-400 space-y-1 list-decimal list-inside">
+              <li>Clone the repo on your Pi: <code className="bg-[#1e293b] px-1.5 py-0.5 rounded">git clone https://github.com/openclaw12/ClawDashboard.git</code></li>
+              <li>Run setup: <code className="bg-[#1e293b] px-1.5 py-0.5 rounded">chmod +x agent/setup-pi.sh && ./agent/setup-pi.sh</code></li>
+              <li>Start agent: <code className="bg-[#1e293b] px-1.5 py-0.5 rounded">node agent/server.js</code></li>
+              <li>Start tunnel: <code className="bg-[#1e293b] px-1.5 py-0.5 rounded">cloudflared tunnel --url http://localhost:9900</code></li>
+              <li>Copy the tunnel URL and paste it above</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+
       {/* Integrations */}
       <div>
         <h2 className="text-base font-semibold text-white mb-4">API Integrations</h2>

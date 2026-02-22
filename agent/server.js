@@ -3,26 +3,83 @@
 /**
  * ClawBot Desktop Agent
  *
- * Local server that:
- * 1. Captures desktop screenshots and streams them via WebSocket
- * 2. Provides bot control API (start/stop, task queue, logs)
- * 3. Runs on localhost:9900
+ * Runs on the machine with the desktop you want to monitor (e.g. Raspberry Pi).
+ * Captures desktop screenshots and streams them via WebSocket.
+ * Provides bot control API (start/stop, task queue, logs).
  *
- * Usage: node agent/server.js
+ * Works on: Linux (Raspberry Pi), Windows, macOS
+ *
+ * Usage:
+ *   node agent/server.js
+ *   node agent/server.js --port 9900
+ *
+ * Then expose via Cloudflare Tunnel for remote access:
+ *   cloudflared tunnel --url http://localhost:9900
  */
 
 const http = require("http");
 const { WebSocketServer } = require("ws");
-const screenshot = require("screenshot-desktop");
+const { execSync, exec } = require("child_process");
+const os = require("os");
+const fs = require("fs");
+const path = require("path");
 
-const PORT = 9900;
-const CAPTURE_INTERVAL_MS = 500; // ~2 FPS for smooth feel
+const PORT = parseInt(process.env.PORT || process.argv.find((a) => a.startsWith("--port="))?.split("=")[1] || "9900", 10);
+const CAPTURE_INTERVAL_MS = parseInt(process.env.CAPTURE_INTERVAL || "800", 10);
 const MAX_LOG_ENTRIES = 500;
+
+// ─── Platform Detection ──────────────────────────────────────────────────────
+
+const platform = os.platform();
+
+function detectCaptureMethod() {
+  if (platform === "win32") {
+    // Windows: use screenshot-desktop (already works)
+    try {
+      require.resolve("screenshot-desktop");
+      return "screenshot-desktop";
+    } catch {
+      return "none";
+    }
+  }
+
+  if (platform === "linux") {
+    // Linux/Pi: try scrot, then import (ImageMagick), then fbgrab
+    try {
+      execSync("which scrot", { stdio: "ignore" });
+      return "scrot";
+    } catch {}
+    try {
+      execSync("which import", { stdio: "ignore" });
+      return "import";
+    } catch {}
+    try {
+      execSync("which fbgrab", { stdio: "ignore" });
+      return "fbgrab";
+    } catch {}
+    try {
+      require.resolve("screenshot-desktop");
+      return "screenshot-desktop";
+    } catch {}
+    return "none";
+  }
+
+  if (platform === "darwin") {
+    return "screencapture";
+  }
+
+  return "none";
+}
+
+const captureMethod = detectCaptureMethod();
+const tmpFile = path.join(os.tmpdir(), "clawbot-frame.jpg");
+
+console.log(`  Platform: ${platform}, Capture method: ${captureMethod}`);
 
 // ─── Bot State ────────────────────────────────────────────────────────────────
 
 const state = {
-  botStatus: "stopped", // stopped | running | paused | error
+  botStatus: "stopped",
   currentTask: null,
   taskQueue: [],
   completedTasks: [],
@@ -39,7 +96,7 @@ function addLog(level, message) {
   const entry = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     timestamp: new Date().toISOString(),
-    level, // info | warn | error | success
+    level,
     message,
   };
   state.logs.unshift(entry);
@@ -69,6 +126,9 @@ function getPublicState() {
         ? Math.floor((Date.now() - new Date(state.startedAt).getTime()) / 1000)
         : 0,
     },
+    platform,
+    captureMethod,
+    hostname: os.hostname(),
   };
 }
 
@@ -76,12 +136,96 @@ function getPublicState() {
 
 let captureInterval = null;
 let lastFrameBase64 = null;
+let captureInProgress = false;
+
+async function captureWithScreenshotDesktop() {
+  const screenshot = require("screenshot-desktop");
+  const imgBuffer = await screenshot({ format: "jpg" });
+  return imgBuffer.toString("base64");
+}
+
+function captureWithScrot() {
+  return new Promise((resolve, reject) => {
+    exec(`scrot -q 60 -o ${tmpFile}`, { timeout: 5000 }, (err) => {
+      if (err) return reject(err);
+      try {
+        const buf = fs.readFileSync(tmpFile);
+        resolve(buf.toString("base64"));
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
+function captureWithImport() {
+  return new Promise((resolve, reject) => {
+    exec(`import -window root -quality 60 ${tmpFile}`, { timeout: 5000 }, (err) => {
+      if (err) return reject(err);
+      try {
+        const buf = fs.readFileSync(tmpFile);
+        resolve(buf.toString("base64"));
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
+function captureWithFbgrab() {
+  return new Promise((resolve, reject) => {
+    exec(`fbgrab ${tmpFile}`, { timeout: 5000 }, (err) => {
+      if (err) return reject(err);
+      try {
+        const buf = fs.readFileSync(tmpFile);
+        resolve(buf.toString("base64"));
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
+function captureWithScreencapture() {
+  return new Promise((resolve, reject) => {
+    exec(`screencapture -x -t jpg ${tmpFile}`, { timeout: 5000 }, (err) => {
+      if (err) return reject(err);
+      try {
+        const buf = fs.readFileSync(tmpFile);
+        resolve(buf.toString("base64"));
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
 
 async function captureFrame() {
+  if (captureInProgress) return;
+  captureInProgress = true;
   try {
-    const imgBuffer = await screenshot({ format: "jpg" });
-    lastFrameBase64 = imgBuffer.toString("base64");
-    // Send frame to all connected WebSocket clients
+    let base64;
+    switch (captureMethod) {
+      case "screenshot-desktop":
+        base64 = await captureWithScreenshotDesktop();
+        break;
+      case "scrot":
+        base64 = await captureWithScrot();
+        break;
+      case "import":
+        base64 = await captureWithImport();
+        break;
+      case "fbgrab":
+        base64 = await captureWithFbgrab();
+        break;
+      case "screencapture":
+        base64 = await captureWithScreencapture();
+        break;
+      default:
+        return;
+    }
+
+    lastFrameBase64 = base64;
     const frameMsg = JSON.stringify({
       type: "frame",
       data: lastFrameBase64,
@@ -91,13 +235,19 @@ async function captureFrame() {
       if (client.readyState === 1) client.send(frameMsg);
     });
   } catch (err) {
-    // Silently handle capture errors (e.g., locked screen)
+    // Silently handle capture errors
+  } finally {
+    captureInProgress = false;
   }
 }
 
 function startCapture() {
+  if (captureMethod === "none") {
+    console.log("  ⚠️  No screenshot tool found. Install scrot: sudo apt install scrot");
+    return;
+  }
   if (captureInterval) return;
-  captureFrame(); // immediate first frame
+  captureFrame();
   captureInterval = setInterval(captureFrame, CAPTURE_INTERVAL_MS);
 }
 
@@ -180,11 +330,10 @@ function processNextTask() {
   broadcastState();
 
   // Simulate task processing (replace with actual bot logic)
-  // In a real integration, this is where ClawBot would execute the task
   const duration = 5000 + Math.random() * 15000;
   setTimeout(() => {
     if (state.currentTask && state.currentTask.id === task.id) {
-      completeCurrentTask(Math.random() > 0.15); // 85% success rate sim
+      completeCurrentTask(Math.random() > 0.15);
     }
   }, duration);
 }
@@ -208,16 +357,14 @@ function completeCurrentTask(success) {
   state.currentTask = null;
   broadcastState();
 
-  // Process next task
   if (state.botStatus === "running") {
     setTimeout(() => processNextTask(), 1000);
   }
 }
 
-// ─── HTTP Server (CORS-enabled REST API) ──────────────────────────────────────
+// ─── HTTP Server ──────────────────────────────────────────────────────────────
 
 const server = http.createServer((req, res) => {
-  // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -229,53 +376,26 @@ const server = http.createServer((req, res) => {
   }
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
-  const path = url.pathname;
+  const p = url.pathname;
 
-  // Health check
-  if (path === "/health" && req.method === "GET") {
+  if (p === "/health" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", agent: "ClawBot Desktop Agent", version: "1.0.0" }));
+    res.end(JSON.stringify({ status: "ok", agent: "ClawBot Desktop Agent", version: "1.1.0", platform, captureMethod, hostname: os.hostname() }));
     return;
   }
 
-  // Get state
-  if (path === "/state" && req.method === "GET") {
+  if (p === "/state" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(getPublicState()));
     return;
   }
 
-  // Bot controls
-  if (path === "/bot/start" && req.method === "POST") {
-    startBot();
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, status: state.botStatus }));
-    return;
-  }
+  if (p === "/bot/start" && req.method === "POST") { startBot(); res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, status: state.botStatus })); return; }
+  if (p === "/bot/stop" && req.method === "POST") { stopBot(); res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, status: state.botStatus })); return; }
+  if (p === "/bot/pause" && req.method === "POST") { pauseBot(); res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, status: state.botStatus })); return; }
+  if (p === "/bot/resume" && req.method === "POST") { resumeBot(); res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, status: state.botStatus })); return; }
 
-  if (path === "/bot/stop" && req.method === "POST") {
-    stopBot();
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, status: state.botStatus }));
-    return;
-  }
-
-  if (path === "/bot/pause" && req.method === "POST") {
-    pauseBot();
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, status: state.botStatus }));
-    return;
-  }
-
-  if (path === "/bot/resume" && req.method === "POST") {
-    resumeBot();
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, status: state.botStatus }));
-    return;
-  }
-
-  // Task management
-  if (path === "/tasks" && req.method === "POST") {
+  if (p === "/tasks" && req.method === "POST") {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
@@ -292,16 +412,14 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (path.startsWith("/tasks/") && req.method === "DELETE") {
-    const taskId = path.split("/tasks/")[1];
-    removeTask(taskId);
+  if (p.startsWith("/tasks/") && req.method === "DELETE") {
+    removeTask(p.split("/tasks/")[1]);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
     return;
   }
 
-  // Latest frame as JPEG (for non-WS clients)
-  if (path === "/frame" && req.method === "GET") {
+  if (p === "/frame" && req.method === "GET") {
     if (lastFrameBase64) {
       const buf = Buffer.from(lastFrameBase64, "base64");
       res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "no-cache" });
@@ -313,8 +431,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Clear logs
-  if (path === "/logs/clear" && req.method === "POST") {
+  if (p === "/logs/clear" && req.method === "POST") {
     state.logs = [];
     addLog("info", "Logs cleared");
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -332,11 +449,7 @@ const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws) => {
   addLog("info", "Dashboard client connected");
-
-  // Send current state immediately
   ws.send(JSON.stringify({ type: "state", data: getPublicState() }));
-
-  // Send latest frame if available
   if (lastFrameBase64) {
     ws.send(JSON.stringify({ type: "frame", data: lastFrameBase64, timestamp: Date.now() }));
   }
@@ -351,47 +464,35 @@ wss.on("connection", (ws) => {
         case "resume": resumeBot(); break;
         case "addTask": addTask(msg.task || {}); break;
         case "removeTask": removeTask(msg.taskId); break;
-        case "clearLogs":
-          state.logs = [];
-          addLog("info", "Logs cleared");
-          break;
+        case "clearLogs": state.logs = []; addLog("info", "Logs cleared"); break;
       }
-    } catch {
-      // Invalid message, ignore
-    }
+    } catch { /* ignore */ }
   });
 
-  ws.on("close", () => {
-    addLog("info", "Dashboard client disconnected");
-  });
+  ws.on("close", () => addLog("info", "Dashboard client disconnected"));
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
-  console.log(`\n  🤖 ClawBot Desktop Agent running on http://localhost:${PORT}`);
-  console.log(`  📡 WebSocket: ws://localhost:${PORT}`);
-  console.log(`  🖥️  Desktop capture: active\n`);
-  console.log(`  Endpoints:`);
-  console.log(`    GET  /health       - Health check`);
-  console.log(`    GET  /state        - Current bot state`);
-  console.log(`    GET  /frame        - Latest desktop screenshot (JPEG)`);
-  console.log(`    POST /bot/start    - Start bot`);
-  console.log(`    POST /bot/stop     - Stop bot`);
-  console.log(`    POST /bot/pause    - Pause bot`);
-  console.log(`    POST /bot/resume   - Resume bot`);
-  console.log(`    POST /tasks        - Add task to queue`);
-  console.log(`    DEL  /tasks/:id    - Remove task from queue`);
-  console.log(`    POST /logs/clear   - Clear logs\n`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`\n  ClawBot Desktop Agent v1.1.0`);
+  console.log(`  ────────────────────────────`);
+  console.log(`  HTTP:      http://0.0.0.0:${PORT}`);
+  console.log(`  WebSocket: ws://0.0.0.0:${PORT}`);
+  console.log(`  Platform:  ${platform} (${os.hostname()})`);
+  console.log(`  Capture:   ${captureMethod}`);
+  console.log(`  Interval:  ${CAPTURE_INTERVAL_MS}ms\n`);
+  console.log(`  To expose remotely via Cloudflare Tunnel:`);
+  console.log(`    cloudflared tunnel --url http://localhost:${PORT}\n`);
 
   startCapture();
-  addLog("info", "Desktop Agent initialized");
+  addLog("info", `Desktop Agent initialized on ${os.hostname()} (${platform})`);
 });
 
-// Graceful shutdown
 process.on("SIGINT", () => {
   console.log("\nShutting down agent...");
   stopCapture();
+  try { fs.unlinkSync(tmpFile); } catch {}
   wss.close();
   server.close();
   process.exit(0);
