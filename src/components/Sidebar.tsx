@@ -12,6 +12,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Cog,
+  Monitor,
+  Bot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +27,8 @@ interface SidebarProps {
 
 const navItems = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "desktop", label: "Live Desktop", icon: Monitor },
+  { id: "botcontrol", label: "Bot Control", icon: Bot },
   { id: "tasks", label: "Tasks", icon: CheckSquare },
   { id: "calendar", label: "Calendar", icon: Calendar },
   { id: "messages", label: "Messages", icon: MessageSquare },

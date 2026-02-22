@@ -11,6 +11,8 @@ import ProjectBoard from "@/components/ProjectBoard";
 import AnalyticsDashboard from "@/components/AnalyticsDashboard";
 import NotificationsPanel from "@/components/NotificationsPanel";
 import SettingsPanel from "@/components/SettingsPanel";
+import LiveDesktopView from "@/components/LiveDesktopView";
+import BotControlPanel from "@/components/BotControlPanel";
 import {
   getDefaultTasks,
   getDefaultEvents,
@@ -36,8 +38,12 @@ import {
   IntegrationConfig,
 } from "@/lib/types";
 
+const AGENT_URL = "ws://localhost:9900";
+
 const viewTitles: Record<string, string> = {
   dashboard: "Dashboard",
+  desktop: "Live Desktop",
+  botcontrol: "Bot Control",
   tasks: "Task Manager",
   calendar: "Calendar",
   messages: "Communications",
@@ -140,6 +146,12 @@ export default function Home() {
               messages={messages}
               productivity={productivity}
             />
+          )}
+          {activeView === "desktop" && (
+            <LiveDesktopView agentUrl={AGENT_URL} />
+          )}
+          {activeView === "botcontrol" && (
+            <BotControlPanel agentUrl={AGENT_URL} />
           )}
           {activeView === "tasks" && (
             <TaskManager tasks={tasks} onUpdate={handleTasksUpdate} />

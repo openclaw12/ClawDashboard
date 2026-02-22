@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "agent": "node agent/server.js"
   },
   "dependencies": {
     "date-fns": "^4.1.0",
@@ -15,13 +16,17 @@
     "react": "^18",
     "react-dom": "^18",
     "recharts": "^3.7.0",
-    "uuid": "^13.0.0"
+    "screenshot-desktop": "^1.15.3",
+    "sharp": "^0.34.5",
+    "uuid": "^13.0.0",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
     "eslint": "^8",
     "eslint-config-next": "14.2.5",
     "postcss": "^8",
