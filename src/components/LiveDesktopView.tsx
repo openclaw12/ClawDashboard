@@ -112,24 +112,31 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
 
   // Try to auto-connect if URL is saved and not the default localhost
   useEffect(() => {
-    if (agentUrl && agentUrl !== "ws://localhost:9900") {
+    if (agentUrl && agentUrl !== "ws://localhost:9900" && agentUrl !== "wss://localhost:9900" && !agentUrl.includes("localhost")) {
       handleConnect(agentUrl);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const connectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const savedDisplayUrl = useRef<string>("");
+
   const handleConnect = useCallback((url?: string) => {
     const connectUrl = url || urlInput.trim();
     if (!connectUrl) return;
 
-    // Normalize URL
+    // Save the display URL (what user typed) before converting
+    const displayUrl = connectUrl.replace(/^wss?:\/\//, "https://").replace(/\/$/, "");
+    savedDisplayUrl.current = displayUrl;
+
+    // Normalize URL for WebSocket
     let wsUrl = connectUrl;
     if (wsUrl.startsWith("https://")) wsUrl = wsUrl.replace("https://", "wss://");
     else if (wsUrl.startsWith("http://")) wsUrl = wsUrl.replace("http://", "ws://");
     else if (!wsUrl.startsWith("ws://") && !wsUrl.startsWith("wss://")) wsUrl = `wss://${wsUrl}`;
     wsUrl = wsUrl.replace(/\/$/, "");
 
-    setUrlInput(wsUrl);
+    setUrlInput(displayUrl);
     setConnectionState("connecting");
     setErrorMsg("");
 
@@ -139,14 +146,25 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
       wsRef.current.close();
     }
     if (reconnectRef.current) clearTimeout(reconnectRef.current);
+    if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
+
+    // Connection timeout - if no response in 15 seconds, fail
+    connectTimeoutRef.current = setTimeout(() => {
+      if (wsRef.current && wsRef.current.readyState !== WebSocket.OPEN) {
+        wsRef.current.close();
+        setConnectionState("disconnected");
+        setErrorMsg("Connection timed out. Check that the tunnel URL is correct and the agent is running.");
+      }
+    }, 15000);
 
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
+      if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
       setConnectionState("connected");
       setErrorMsg("");
       // Save the URL so it auto-connects next time
-      if (onAgentUrlUpdate) onAgentUrlUpdate(wsUrl);
+      if (onAgentUrlUpdate) onAgentUrlUpdate(displayUrl);
     };
 
     ws.onmessage = (event) => {
@@ -163,17 +181,21 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     };
 
     ws.onclose = () => {
+      if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
       setConnectionState("disconnected");
       setFrame(null);
-      // Auto-reconnect if was previously connected
-      reconnectRef.current = setTimeout(() => {
-        if (wsUrl && onAgentUrlUpdate) handleConnect(wsUrl);
-      }, 5000);
+      // Auto-reconnect if was previously connected and URL was saved
+      if (savedDisplayUrl.current && onAgentUrlUpdate) {
+        reconnectRef.current = setTimeout(() => {
+          handleConnect(savedDisplayUrl.current);
+        }, 5000);
+      }
     };
 
     ws.onerror = () => {
+      if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
       setConnectionState("disconnected");
-      setErrorMsg("Could not connect. Make sure the agent is running on your Pi.");
+      setErrorMsg("Could not connect. Check the URL and make sure the agent is running on your Pi.");
     };
 
     wsRef.current = ws;
@@ -205,6 +227,7 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     return () => {
       clearInterval(interval);
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
+      if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
       wsRef.current?.close();
     };
   }, []);

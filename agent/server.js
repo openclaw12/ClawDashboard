@@ -379,6 +379,12 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const p = url.pathname;
 
+  if (p === "/" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(`<html><body style="background:#0f172a;color:#94a3b8;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h1 style="color:#3b82f6">ClawBot Agent</h1><p>Agent is running on ${os.hostname()}</p><p style="color:#64748b">Connect via <a href="https://claw-dashboard-coral.vercel.app" style="color:#3b82f6">ClawDashboard</a></p></div></body></html>`);
+    return;
+  }
+
   if (p === "/health" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok", agent: "ClawBot Desktop Agent", version: "1.1.0", platform, captureMethod, hostname: os.hostname() }));
