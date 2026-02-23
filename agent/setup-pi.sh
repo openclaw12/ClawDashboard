@@ -5,10 +5,7 @@
 # Run this ONCE on your Pi. After that, everything auto-starts on boot.
 # You'll never need to touch the Pi again.
 #
-# Usage (from the repo directory):
-#   chmod +x agent/setup-pi.sh && ./agent/setup-pi.sh
-#
-# Or remote install:
+# Usage:
 #   curl -fsSL https://raw.githubusercontent.com/openclaw12/ClawDashboard/master/agent/setup-pi.sh | bash
 #
 
@@ -28,7 +25,7 @@ echo "  Home:    $HOME_DIR"
 echo "  Repo:    $REPO_DIR"
 echo ""
 
-# ─── Step 1: Clone repo if not present ────────────────────────────────────────
+# ─── Step 1: Clone or update repo ────────────────────────────────────────────
 
 if [ ! -d "$REPO_DIR" ]; then
     echo "  [1/6] Cloning ClawDashboard repo..."
@@ -40,7 +37,7 @@ fi
 
 cd "$REPO_DIR"
 
-# ─── Step 2: Install Node.js ──────────────────────────────────────────────────
+# ─── Step 2: Install Node.js ─────────────────────────────────────────────────
 
 if ! command -v node &> /dev/null; then
     echo "  [2/6] Installing Node.js 20..."
@@ -50,7 +47,7 @@ else
     echo "  [2/6] Node.js already installed: $(node --version)"
 fi
 
-# ─── Step 3: Install scrot ────────────────────────────────────────────────────
+# ─── Step 3: Install scrot ───────────────────────────────────────────────────
 
 if ! command -v scrot &> /dev/null; then
     echo "  [3/6] Installing scrot (screenshot tool)..."
@@ -60,7 +57,7 @@ else
     echo "  [3/6] scrot already installed"
 fi
 
-# ─── Step 4: Install cloudflared ───────────────────────────────────────────────
+# ─── Step 4: Install cloudflared ──────────────────────────────────────────────
 
 if ! command -v cloudflared &> /dev/null; then
     echo "  [4/6] Installing cloudflared..."
@@ -77,15 +74,23 @@ else
     echo "  [4/6] cloudflared already installed: $(cloudflared --version 2>&1 | head -1)"
 fi
 
-# ─── Step 5: Install npm dependencies ─────────────────────────────────────────
+# ─── Step 5: Install npm dependencies ────────────────────────────────────────
 
 echo "  [5/6] Installing Node.js dependencies..."
 cd "$REPO_DIR"
 npm install --production 2>&1 | tail -1
 
-# ─── Step 6: Setup systemd services ───────────────────────────────────────────
+# ─── Step 6: Setup systemd services ──────────────────────────────────────────
 
 echo "  [6/6] Setting up auto-start services..."
+
+# Stop existing services if running
+systemctl --user stop clawbot-tunnel.service 2>/dev/null || true
+systemctl --user stop clawbot-agent.service 2>/dev/null || true
+
+# Clean old tunnel URL
+rm -f "$HOME_DIR/.clawbot-tunnel-url"
+rm -f "$HOME_DIR/.clawbot-tunnel.log"
 
 # Create user systemd directory
 mkdir -p "$HOME_DIR/.config/systemd/user"
@@ -112,7 +117,7 @@ EOSVC
 # Make tunnel wrapper executable
 chmod +x "$REPO_DIR/agent/start-tunnel.sh"
 
-# Tunnel service (uses wrapper that captures URL to file)
+# Tunnel service
 cat > "$HOME_DIR/.config/systemd/user/clawbot-tunnel.service" << EOSVC
 [Unit]
 Description=ClawBot Cloudflare Tunnel
@@ -129,7 +134,7 @@ RestartSec=10
 WantedBy=default.target
 EOSVC
 
-# Enable and start services
+# Reload and start
 systemctl --user daemon-reload
 systemctl --user enable clawbot-agent.service
 systemctl --user enable clawbot-tunnel.service
@@ -139,21 +144,20 @@ systemctl --user start clawbot-tunnel.service
 # Enable lingering so services start even without login
 sudo loginctl enable-linger "$USER_NAME" 2>/dev/null || true
 
-# Wait for tunnel to get its URL (reads from the file the wrapper creates)
+# Wait for tunnel URL (the wrapper script saves it to a file)
 echo ""
-echo "  Waiting for tunnel URL..."
-sleep 5
+echo "  Waiting for tunnel URL (up to 30s)..."
 
 TUNNEL_URL=""
 TUNNEL_URL_FILE="$HOME_DIR/.clawbot-tunnel-url"
-for i in $(seq 1 15); do
+for i in $(seq 1 30); do
     if [ -f "$TUNNEL_URL_FILE" ]; then
         TUNNEL_URL=$(cat "$TUNNEL_URL_FILE" 2>/dev/null)
         if [ -n "$TUNNEL_URL" ]; then
             break
         fi
     fi
-    sleep 2
+    sleep 1
 done
 
 echo ""
@@ -163,27 +167,27 @@ echo "  ╚═══════════════════════
 echo ""
 
 if [ -n "$TUNNEL_URL" ]; then
-    echo "  Your tunnel URL is:"
+    echo "  ✓ Your tunnel URL is:"
     echo ""
     echo "    $TUNNEL_URL"
     echo ""
-    echo "  Go to the ClawDashboard website and paste this URL"
-    echo "  in the Live Desktop connect screen."
+    echo "  Go to https://claw-dashboard-coral.vercel.app"
+    echo "  Click 'Live Desktop' and paste this URL to connect!"
 else
-    echo "  Tunnel URL not ready yet. Wait a minute then check with:"
-    echo "    cat ~/.clawbot-tunnel-url"
+    echo "  Tunnel URL not ready yet. Try:"
+    echo "    sleep 15 && cat ~/.clawbot-tunnel-url"
     echo ""
-    echo "  Or restart the tunnel:"
-    echo "    systemctl --user restart clawbot-tunnel && sleep 10 && cat ~/.clawbot-tunnel-url"
+    echo "  Or check the log:"
+    echo "    cat ~/.clawbot-tunnel.log | grep trycloudflare"
 fi
 
 echo ""
-echo "  Both services are set to auto-start on boot."
-echo "  You can now close this terminal and never touch this Pi again."
+echo "  Both services auto-start on boot."
+echo "  You can close this terminal and never touch this Pi again."
 echo ""
 echo "  Useful commands:"
 echo "    systemctl --user status clawbot-agent"
 echo "    systemctl --user status clawbot-tunnel"
-echo "    systemctl --user restart clawbot-agent"
 echo "    systemctl --user restart clawbot-tunnel"
+echo "    cat ~/.clawbot-tunnel-url"
 echo ""
