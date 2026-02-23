@@ -109,7 +109,10 @@ RestartSec=5
 WantedBy=default.target
 EOSVC
 
-# Tunnel service
+# Make tunnel wrapper executable
+chmod +x "$REPO_DIR/agent/start-tunnel.sh"
+
+# Tunnel service (uses wrapper that captures URL to file)
 cat > "$HOME_DIR/.config/systemd/user/clawbot-tunnel.service" << EOSVC
 [Unit]
 Description=ClawBot Cloudflare Tunnel
@@ -118,7 +121,7 @@ Requires=clawbot-agent.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/cloudflared tunnel --url http://localhost:9900 --no-autoupdate
+ExecStart=/bin/bash $REPO_DIR/agent/start-tunnel.sh 9900
 Restart=always
 RestartSec=10
 
@@ -136,16 +139,19 @@ systemctl --user start clawbot-tunnel.service
 # Enable lingering so services start even without login
 sudo loginctl enable-linger "$USER_NAME" 2>/dev/null || true
 
-# Wait for tunnel to get its URL
+# Wait for tunnel to get its URL (reads from the file the wrapper creates)
 echo ""
 echo "  Waiting for tunnel URL..."
 sleep 5
 
 TUNNEL_URL=""
-for i in $(seq 1 12); do
-    TUNNEL_URL=$(journalctl --user -u clawbot-tunnel.service --no-pager -n 50 2>/dev/null | grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1)
-    if [ -n "$TUNNEL_URL" ]; then
-        break
+TUNNEL_URL_FILE="$HOME_DIR/.clawbot-tunnel-url"
+for i in $(seq 1 15); do
+    if [ -f "$TUNNEL_URL_FILE" ]; then
+        TUNNEL_URL=$(cat "$TUNNEL_URL_FILE" 2>/dev/null)
+        if [ -n "$TUNNEL_URL" ]; then
+            break
+        fi
     fi
     sleep 2
 done
@@ -164,10 +170,11 @@ if [ -n "$TUNNEL_URL" ]; then
     echo "  Go to the ClawDashboard website and paste this URL"
     echo "  in the Live Desktop connect screen."
 else
-    echo "  Tunnel URL not ready yet. Check with:"
-    echo "    journalctl --user -u clawbot-tunnel.service -f"
+    echo "  Tunnel URL not ready yet. Wait a minute then check with:"
+    echo "    cat ~/.clawbot-tunnel-url"
     echo ""
-    echo "  Look for a URL like: https://xxx-xxx.trycloudflare.com"
+    echo "  Or restart the tunnel:"
+    echo "    systemctl --user restart clawbot-tunnel && sleep 10 && cat ~/.clawbot-tunnel-url"
 fi
 
 echo ""

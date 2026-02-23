@@ -27,6 +27,7 @@ const path = require("path");
 const PORT = parseInt(process.env.PORT || process.argv.find((a) => a.startsWith("--port="))?.split("=")[1] || "9900", 10);
 const CAPTURE_INTERVAL_MS = parseInt(process.env.CAPTURE_INTERVAL || "800", 10);
 const MAX_LOG_ENTRIES = 500;
+const TUNNEL_URL_FILE = path.join(os.homedir(), ".clawbot-tunnel-url");
 
 // ─── Platform Detection ──────────────────────────────────────────────────────
 
@@ -381,6 +382,18 @@ const server = http.createServer((req, res) => {
   if (p === "/health" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok", agent: "ClawBot Desktop Agent", version: "1.1.0", platform, captureMethod, hostname: os.hostname() }));
+    return;
+  }
+
+  if (p === "/tunnel-url" && req.method === "GET") {
+    try {
+      const tunnelUrl = fs.readFileSync(TUNNEL_URL_FILE, "utf8").trim();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ url: tunnelUrl }));
+    } catch {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ url: null, error: "Tunnel URL not found yet" }));
+    }
     return;
   }
 
