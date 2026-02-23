@@ -97,7 +97,10 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
   const [fps, setFps] = useState(0);
   const [fullscreen, setFullscreen] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [streamMode, setStreamMode] = useState<"ws" | "http">("ws");
   const frameCountRef = useRef(0);
+  const httpPollRef = useRef<NodeJS.Timeout | null>(null);
+  const wsFrameReceived = useRef(false);
 
   // Bot state
   const [botState, setBotState] = useState<BotState>(defaultBotState);
@@ -163,14 +166,36 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
       if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
       setConnectionState("connected");
       setErrorMsg("");
+      wsFrameReceived.current = false;
       // Save the URL so it auto-connects next time
       if (onAgentUrlUpdate) onAgentUrlUpdate(displayUrl);
+
+      // Fetch initial state via HTTP (reliable)
+      const httpUrl = displayUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
+      fetch(`${httpUrl}/state`).then(r => r.json()).then(data => setBotState(data)).catch(() => {});
+
+      // Start HTTP frame polling as fallback — if WS frames arrive, we'll stop polling
+      startHttpPolling(httpUrl);
+
+      // After 3 seconds, check if WS frames came through
+      setTimeout(() => {
+        if (!wsFrameReceived.current) {
+          setStreamMode("http");
+        }
+      }, 3000);
     };
 
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === "frame" && msg.data) {
+          wsFrameReceived.current = true;
+          // If we got a WS frame, stop HTTP polling and use WS mode
+          if (httpPollRef.current) {
+            clearInterval(httpPollRef.current);
+            httpPollRef.current = null;
+          }
+          setStreamMode("ws");
           setFrame(msg.data);
           frameCountRef.current++;
         }
@@ -201,8 +226,36 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     wsRef.current = ws;
   }, [urlInput, onAgentUrlUpdate]);
 
+  const startHttpPolling = useCallback((httpUrl: string) => {
+    // Clear any existing polling
+    if (httpPollRef.current) clearInterval(httpPollRef.current);
+
+    let polling = false;
+    httpPollRef.current = setInterval(async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const resp = await fetch(`${httpUrl}/frame`);
+        if (resp.ok) {
+          const blob = await resp.blob();
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const result = reader.result as string;
+            if (result) {
+              setFrame(result);
+              frameCountRef.current++;
+            }
+          };
+          reader.readAsDataURL(blob);
+        }
+      } catch { /* ignore */ }
+      polling = false;
+    }, 1000);
+  }, []);
+
   const disconnect = () => {
     if (reconnectRef.current) clearTimeout(reconnectRef.current);
+    if (httpPollRef.current) { clearInterval(httpPollRef.current); httpPollRef.current = null; }
     if (wsRef.current) {
       wsRef.current.onclose = null;
       wsRef.current.close();
@@ -210,6 +263,7 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     setConnectionState("disconnected");
     setFrame(null);
     setBotState(defaultBotState);
+    setStreamMode("ws");
   };
 
   const sendAction = (action: string, extra?: Record<string, unknown>) => {
@@ -228,6 +282,7 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
       clearInterval(interval);
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
       if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
+      if (httpPollRef.current) clearInterval(httpPollRef.current);
       wsRef.current?.close();
     };
   }, []);
@@ -347,7 +402,7 @@ chmod +x agent/setup-pi.sh
           {botState.hostname && (
             <span className="text-xs text-slate-500">{botState.hostname}</span>
           )}
-          <span className="text-xs text-slate-600">{fps} FPS</span>
+          <span className="text-xs text-slate-600">{fps} FPS{streamMode === "http" ? " (HTTP)" : ""}</span>
           <span className={cn("text-xs font-medium capitalize", statusColors[botState.botStatus])}>
             Bot: {botState.botStatus}
           </span>
@@ -390,7 +445,7 @@ chmod +x agent/setup-pi.sh
           <button onClick={() => setZoom(Math.min(2, zoom + 0.25))} className="p-1.5 rounded-lg hover:bg-[#334155] text-slate-400 hover:text-white transition-colors" title="Zoom in">
             <ZoomIn className="w-4 h-4" />
           </button>
-          <button onClick={() => { if (frame) { const a = document.createElement("a"); a.href = `data:image/jpeg;base64,${frame}`; a.download = `openclaw-${Date.now()}.jpg`; a.click(); }}} className="p-1.5 rounded-lg hover:bg-[#334155] text-slate-400 hover:text-white transition-colors" title="Screenshot">
+          <button onClick={() => { if (frame) { const a = document.createElement("a"); a.href = frame.startsWith("data:") ? frame : `data:image/jpeg;base64,${frame}`; a.download = `openclaw-${Date.now()}.jpg`; a.click(); }}} className="p-1.5 rounded-lg hover:bg-[#334155] text-slate-400 hover:text-white transition-colors" title="Screenshot">
             <Camera className="w-4 h-4" />
           </button>
           <button onClick={toggleFullscreen} className="p-1.5 rounded-lg hover:bg-[#334155] text-slate-400 hover:text-white transition-colors" title="Fullscreen">
@@ -420,7 +475,7 @@ chmod +x agent/setup-pi.sh
         )}>
           {frame ? (
             <img
-              src={`data:image/jpeg;base64,${frame}`}
+              src={frame.startsWith("data:") ? frame : `data:image/jpeg;base64,${frame}`}
               alt="OpenClaw Desktop"
               className="max-w-full max-h-full object-contain transition-transform"
               style={{ transform: `scale(${zoom})` }}
