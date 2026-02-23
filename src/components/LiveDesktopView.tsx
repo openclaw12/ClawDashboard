@@ -123,119 +123,20 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
 
   const connectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const savedDisplayUrl = useRef<string>("");
+  const httpBaseUrl = useRef<string>("");
 
-  const handleConnect = useCallback((url?: string) => {
-    const connectUrl = url || urlInput.trim();
-    if (!connectUrl) return;
-
-    // Save the display URL (what user typed) before converting
-    const displayUrl = connectUrl.replace(/^wss?:\/\//, "https://").replace(/\/$/, "");
-    savedDisplayUrl.current = displayUrl;
-
-    // Normalize URL for WebSocket
-    let wsUrl = connectUrl;
-    if (wsUrl.startsWith("https://")) wsUrl = wsUrl.replace("https://", "wss://");
-    else if (wsUrl.startsWith("http://")) wsUrl = wsUrl.replace("http://", "ws://");
-    else if (!wsUrl.startsWith("ws://") && !wsUrl.startsWith("wss://")) wsUrl = `wss://${wsUrl}`;
-    wsUrl = wsUrl.replace(/\/$/, "");
-
-    setUrlInput(displayUrl);
-    setConnectionState("connecting");
-    setErrorMsg("");
-
-    // Close existing connection
-    if (wsRef.current) {
-      wsRef.current.onclose = null;
-      wsRef.current.close();
-    }
-    if (reconnectRef.current) clearTimeout(reconnectRef.current);
-    if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
-
-    // Connection timeout - if no response in 15 seconds, fail
-    connectTimeoutRef.current = setTimeout(() => {
-      if (wsRef.current && wsRef.current.readyState !== WebSocket.OPEN) {
-        wsRef.current.close();
-        setConnectionState("disconnected");
-        setErrorMsg("Connection timed out. Check that the tunnel URL is correct and the agent is running.");
-      }
-    }, 15000);
-
-    const ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
-      setConnectionState("connected");
-      setErrorMsg("");
-      wsFrameReceived.current = false;
-      // Save the URL so it auto-connects next time
-      if (onAgentUrlUpdate) onAgentUrlUpdate(displayUrl);
-
-      // Fetch initial state via HTTP (reliable)
-      const httpUrl = displayUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
-      fetch(`${httpUrl}/state`).then(r => r.json()).then(data => setBotState(data)).catch(() => {});
-
-      // Start HTTP frame polling as fallback — if WS frames arrive, we'll stop polling
-      startHttpPolling(httpUrl);
-
-      // After 3 seconds, check if WS frames came through
-      setTimeout(() => {
-        if (!wsFrameReceived.current) {
-          setStreamMode("http");
-        }
-      }, 3000);
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "frame" && msg.data) {
-          wsFrameReceived.current = true;
-          // If we got a WS frame, stop HTTP polling and use WS mode
-          if (httpPollRef.current) {
-            clearInterval(httpPollRef.current);
-            httpPollRef.current = null;
-          }
-          setStreamMode("ws");
-          setFrame(msg.data);
-          frameCountRef.current++;
-        }
-        if (msg.type === "state" && msg.data) {
-          setBotState(msg.data);
-        }
-      } catch { /* ignore */ }
-    };
-
-    ws.onclose = () => {
-      if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
-      setConnectionState("disconnected");
-      setFrame(null);
-      // Auto-reconnect if was previously connected and URL was saved
-      if (savedDisplayUrl.current && onAgentUrlUpdate) {
-        reconnectRef.current = setTimeout(() => {
-          handleConnect(savedDisplayUrl.current);
-        }, 5000);
-      }
-    };
-
-    ws.onerror = () => {
-      if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
-      setConnectionState("disconnected");
-      setErrorMsg("Could not connect. Check the URL and make sure the agent is running on your Pi.");
-    };
-
-    wsRef.current = ws;
-  }, [urlInput, onAgentUrlUpdate]);
-
-  const startHttpPolling = useCallback((httpUrl: string) => {
-    // Clear any existing polling
+  // HTTP polling for frames - works reliably through Cloudflare Tunnel
+  const doStartHttpPolling = useCallback(() => {
     if (httpPollRef.current) clearInterval(httpPollRef.current);
+    const baseUrl = httpBaseUrl.current;
+    if (!baseUrl) return;
 
     let polling = false;
     httpPollRef.current = setInterval(async () => {
       if (polling) return;
       polling = true;
       try {
-        const resp = await fetch(`${httpUrl}/frame`);
+        const resp = await fetch(`${baseUrl}/frame`);
         if (resp.ok) {
           const blob = await resp.blob();
           const reader = new FileReader();
@@ -253,13 +154,108 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     }, 1000);
   }, []);
 
+  const handleConnect = useCallback((url?: string) => {
+    const connectUrl = url || urlInput.trim();
+    if (!connectUrl) return;
+
+    // Build the HTTPS base URL for HTTP requests
+    let baseHttpUrl = connectUrl;
+    if (baseHttpUrl.startsWith("wss://")) baseHttpUrl = baseHttpUrl.replace("wss://", "https://");
+    else if (baseHttpUrl.startsWith("ws://")) baseHttpUrl = baseHttpUrl.replace("ws://", "http://");
+    else if (!baseHttpUrl.startsWith("http://") && !baseHttpUrl.startsWith("https://")) baseHttpUrl = `https://${baseHttpUrl}`;
+    baseHttpUrl = baseHttpUrl.replace(/\/$/, "");
+
+    const displayUrl = baseHttpUrl;
+    savedDisplayUrl.current = displayUrl;
+    httpBaseUrl.current = baseHttpUrl;
+
+    // Build WSS URL for WebSocket
+    let wsUrl = baseHttpUrl;
+    if (wsUrl.startsWith("https://")) wsUrl = wsUrl.replace("https://", "wss://");
+    else if (wsUrl.startsWith("http://")) wsUrl = wsUrl.replace("http://", "ws://");
+
+    setUrlInput(displayUrl);
+    setConnectionState("connecting");
+    setErrorMsg("");
+
+    // Close existing connections
+    if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
+    if (reconnectRef.current) clearTimeout(reconnectRef.current);
+    if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
+    if (httpPollRef.current) { clearInterval(httpPollRef.current); httpPollRef.current = null; }
+
+    // First, verify the agent is reachable via HTTP before trying WebSocket
+    fetch(`${baseHttpUrl}/health`)
+      .then(r => r.json())
+      .then(health => {
+        if (!health.status) throw new Error("Bad response");
+
+        // Agent is reachable! Now try WebSocket AND start HTTP polling simultaneously
+        setConnectionState("connected");
+        setErrorMsg("");
+        wsFrameReceived.current = false;
+        if (onAgentUrlUpdate) onAgentUrlUpdate(displayUrl);
+
+        // Fetch bot state
+        fetch(`${baseHttpUrl}/state`).then(r => r.json()).then(data => setBotState(data)).catch(() => {});
+
+        // Start HTTP polling immediately (guaranteed to work since /health worked)
+        doStartHttpPolling();
+        setStreamMode("http");
+
+        // Also try WebSocket for faster streaming
+        try {
+          const ws = new WebSocket(wsUrl);
+
+          ws.onopen = () => {
+            // WS connected too - but keep HTTP polling until we get a WS frame
+          };
+
+          ws.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(event.data);
+              if (msg.type === "frame" && msg.data) {
+                wsFrameReceived.current = true;
+                // WS frames working! Stop HTTP polling and switch to WS
+                if (httpPollRef.current) { clearInterval(httpPollRef.current); httpPollRef.current = null; }
+                setStreamMode("ws");
+                setFrame(msg.data);
+                frameCountRef.current++;
+              }
+              if (msg.type === "state" && msg.data) {
+                setBotState(msg.data);
+              }
+            } catch { /* ignore */ }
+          };
+
+          ws.onclose = () => {
+            // If WS drops, fall back to HTTP polling
+            if (!httpPollRef.current && httpBaseUrl.current) {
+              doStartHttpPolling();
+              setStreamMode("http");
+            }
+          };
+
+          ws.onerror = () => {
+            // WS failed, but HTTP polling is already running so that's fine
+          };
+
+          wsRef.current = ws;
+        } catch {
+          // WebSocket creation failed, HTTP polling is already running
+        }
+      })
+      .catch(() => {
+        setConnectionState("disconnected");
+        setErrorMsg("Could not reach agent. Check the URL and make sure the agent is running on your Pi.");
+      });
+  }, [urlInput, onAgentUrlUpdate, doStartHttpPolling]);
+
   const disconnect = () => {
     if (reconnectRef.current) clearTimeout(reconnectRef.current);
     if (httpPollRef.current) { clearInterval(httpPollRef.current); httpPollRef.current = null; }
-    if (wsRef.current) {
-      wsRef.current.onclose = null;
-      wsRef.current.close();
-    }
+    if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
+    if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
     setConnectionState("disconnected");
     setFrame(null);
     setBotState(defaultBotState);
