@@ -13,6 +13,7 @@ import {
   ChevronRight,
   Cog,
   Monitor,
+  BookOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +34,7 @@ const navItems = [
   { id: "projects", label: "Projects", icon: Kanban },
   { id: "analytics", label: "Analytics", icon: BarChart3 },
   { id: "notifications", label: "Notifications", icon: Bell },
+  { id: "setup", label: "Setup Guide", icon: BookOpen },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 

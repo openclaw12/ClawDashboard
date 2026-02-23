@@ -28,6 +28,8 @@ const PORT = parseInt(process.env.PORT || process.argv.find((a) => a.startsWith(
 const CAPTURE_INTERVAL_MS = parseInt(process.env.CAPTURE_INTERVAL || "800", 10);
 const MAX_LOG_ENTRIES = 500;
 const TUNNEL_URL_FILE = path.join(os.homedir(), ".clawbot-tunnel-url");
+const DEVICE_ID_FILE = path.join(os.homedir(), ".clawbot-device-id");
+const DASHBOARD_URL = process.env.DASHBOARD_URL || "https://claw-dashboard-coral.vercel.app";
 
 // ─── Platform Detection ──────────────────────────────────────────────────────
 
@@ -387,7 +389,7 @@ const server = http.createServer((req, res) => {
 
   if (p === "/health" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", agent: "ClawBot Desktop Agent", version: "1.1.0", platform, captureMethod, hostname: os.hostname() }));
+    res.end(JSON.stringify({ status: "ok", agent: "ClawBot Desktop Agent", version: "1.2.0", platform, captureMethod, hostname: os.hostname(), deviceId }));
     return;
   }
 
@@ -491,26 +493,113 @@ wss.on("connection", (ws) => {
   ws.on("close", () => addLog("info", "Dashboard client disconnected"));
 });
 
+// ─── Device Registration ──────────────────────────────────────────────────────
+
+function getDeviceId() {
+  try {
+    return fs.readFileSync(DEVICE_ID_FILE, "utf8").trim();
+  } catch {
+    // Generate a device ID from hostname + random suffix
+    const id = os.hostname().toLowerCase().replace(/[^a-z0-9]/g, "") + "-" + Math.random().toString(36).slice(2, 6);
+    fs.writeFileSync(DEVICE_ID_FILE, id);
+    return id;
+  }
+}
+
+const deviceId = getDeviceId();
+let registrationInterval = null;
+
+function registerWithDashboard() {
+  try {
+    const tunnelUrl = fs.readFileSync(TUNNEL_URL_FILE, "utf8").trim();
+    if (!tunnelUrl) return;
+
+    const postData = JSON.stringify({
+      deviceId,
+      tunnelUrl,
+      hostname: os.hostname(),
+    });
+
+    const url = new URL(`${DASHBOARD_URL}/api/register`);
+    const options = {
+      hostname: url.hostname,
+      port: url.port || (url.protocol === "https:" ? 443 : 80),
+      path: url.pathname,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(postData),
+      },
+    };
+
+    const lib = url.protocol === "https:" ? require("https") : http;
+    const req = lib.request(options, (res) => {
+      let body = "";
+      res.on("data", (chunk) => (body += chunk));
+      res.on("end", () => {
+        if (res.statusCode === 200) {
+          console.log(`  Registered with dashboard: ${deviceId} -> ${tunnelUrl}`);
+        }
+      });
+    });
+    req.on("error", () => {
+      // Silent fail - will retry on next heartbeat
+    });
+    req.setTimeout(10000, () => req.destroy());
+    req.write(postData);
+    req.end();
+  } catch {
+    // Tunnel URL file doesn't exist yet
+  }
+}
+
+function startRegistration() {
+  // Try to register immediately
+  registerWithDashboard();
+  // Then heartbeat every 30 seconds
+  registrationInterval = setInterval(registerWithDashboard, 30000);
+}
+
+// Also watch for tunnel URL file creation
+function watchForTunnelUrl() {
+  const checkInterval = setInterval(() => {
+    try {
+      const url = fs.readFileSync(TUNNEL_URL_FILE, "utf8").trim();
+      if (url) {
+        registerWithDashboard();
+        clearInterval(checkInterval);
+      }
+    } catch {
+      // File doesn't exist yet, keep waiting
+    }
+  }, 2000);
+  // Stop watching after 2 minutes
+  setTimeout(() => clearInterval(checkInterval), 120000);
+}
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`\n  ClawBot Desktop Agent v1.1.0`);
+  console.log(`\n  ClawBot Desktop Agent v1.2.0`);
   console.log(`  ────────────────────────────`);
   console.log(`  HTTP:      http://0.0.0.0:${PORT}`);
   console.log(`  WebSocket: ws://0.0.0.0:${PORT}`);
   console.log(`  Platform:  ${platform} (${os.hostname()})`);
   console.log(`  Capture:   ${captureMethod}`);
+  console.log(`  Device ID: ${deviceId}`);
+  console.log(`  Dashboard: ${DASHBOARD_URL}`);
   console.log(`  Interval:  ${CAPTURE_INTERVAL_MS}ms\n`);
-  console.log(`  To expose remotely via Cloudflare Tunnel:`);
-  console.log(`    cloudflared tunnel --url http://localhost:${PORT}\n`);
 
   startCapture();
-  addLog("info", `Desktop Agent initialized on ${os.hostname()} (${platform})`);
+  startRegistration();
+  watchForTunnelUrl();
+  addLog("info", `Desktop Agent initialized on ${os.hostname()} (${platform}), device: ${deviceId}`);
 });
 
 process.on("SIGINT", () => {
   console.log("\nShutting down agent...");
   stopCapture();
+  if (registrationInterval) clearInterval(registrationInterval);
   try { fs.unlinkSync(tmpFile); } catch {}
   wss.close();
   server.close();

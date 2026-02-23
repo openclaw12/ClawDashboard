@@ -14,6 +14,8 @@ set -e
 USER_NAME=$(whoami)
 HOME_DIR=$(eval echo ~$USER_NAME)
 REPO_DIR="$HOME_DIR/ClawDashboard"
+DEVICE_ID_FILE="$HOME_DIR/.clawbot-device-id"
+DASHBOARD_URL="https://claw-dashboard-coral.vercel.app"
 
 echo ""
 echo "  ╔══════════════════════════════════════╗"
@@ -92,6 +94,14 @@ systemctl --user stop clawbot-agent.service 2>/dev/null || true
 rm -f "$HOME_DIR/.clawbot-tunnel-url"
 rm -f "$HOME_DIR/.clawbot-tunnel.log"
 
+# Generate device ID if not exists
+if [ ! -f "$DEVICE_ID_FILE" ]; then
+    HOSTNAME_CLEAN=$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+    RANDOM_SUFFIX=$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 4)
+    echo "${HOSTNAME_CLEAN}-${RANDOM_SUFFIX}" > "$DEVICE_ID_FILE"
+fi
+DEVICE_ID=$(cat "$DEVICE_ID_FILE")
+
 # Create user systemd directory
 mkdir -p "$HOME_DIR/.config/systemd/user"
 
@@ -105,6 +115,7 @@ After=graphical-session.target
 Type=simple
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=$HOME_DIR/.Xauthority
+Environment=DASHBOARD_URL=$DASHBOARD_URL
 WorkingDirectory=$REPO_DIR
 ExecStart=/usr/bin/node $REPO_DIR/agent/server.js
 Restart=always
@@ -160,34 +171,43 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# Wait a moment then register with dashboard
+echo "  Registering with dashboard..."
+sleep 3
+if [ -n "$TUNNEL_URL" ]; then
+    curl -s -X POST "$DASHBOARD_URL/api/register" \
+        -H "Content-Type: application/json" \
+        -d "{\"deviceId\":\"$DEVICE_ID\",\"tunnelUrl\":\"$TUNNEL_URL\",\"hostname\":\"$(hostname)\"}" \
+        > /dev/null 2>&1 || true
+fi
+
 echo ""
 echo "  ╔══════════════════════════════════════════════╗"
 echo "  ║              SETUP COMPLETE!                 ║"
 echo "  ╚══════════════════════════════════════════════╝"
 echo ""
+echo "  ✓ Device ID: $DEVICE_ID"
 
 if [ -n "$TUNNEL_URL" ]; then
-    echo "  ✓ Your tunnel URL is:"
-    echo ""
-    echo "    $TUNNEL_URL"
-    echo ""
-    echo "  Go to https://claw-dashboard-coral.vercel.app"
-    echo "  Click 'Live Desktop' and paste this URL to connect!"
-else
-    echo "  Tunnel URL not ready yet. Try:"
-    echo "    sleep 15 && cat ~/.clawbot-tunnel-url"
-    echo ""
-    echo "  Or check the log:"
-    echo "    cat ~/.clawbot-tunnel.log | grep trycloudflare"
+    echo "  ✓ Tunnel:    $TUNNEL_URL"
+    echo "  ✓ Registered with dashboard"
 fi
 
 echo ""
+echo "  ┌──────────────────────────────────────────────┐"
+echo "  │  Go to: $DASHBOARD_URL      │"
+echo "  │  Click 'Live Desktop' → Click 'Connect'      │"
+echo "  │  That's it! It will find your Pi              │"
+echo "  │  automatically.                               │"
+echo "  └──────────────────────────────────────────────┘"
+echo ""
 echo "  Both services auto-start on boot."
-echo "  You can close this terminal and never touch this Pi again."
+echo "  You can close this terminal now."
 echo ""
 echo "  Useful commands:"
 echo "    systemctl --user status clawbot-agent"
 echo "    systemctl --user status clawbot-tunnel"
 echo "    systemctl --user restart clawbot-tunnel"
 echo "    cat ~/.clawbot-tunnel-url"
+echo "    cat ~/.clawbot-device-id"
 echo ""

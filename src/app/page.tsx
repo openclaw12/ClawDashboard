@@ -12,6 +12,7 @@ import AnalyticsDashboard from "@/components/AnalyticsDashboard";
 import NotificationsPanel from "@/components/NotificationsPanel";
 import SettingsPanel from "@/components/SettingsPanel";
 import LiveDesktopView from "@/components/LiveDesktopView";
+import SetupGuide from "@/components/SetupGuide";
 import {
   getDefaultTasks,
   getDefaultEvents,
@@ -59,6 +60,7 @@ const viewTitles: Record<string, string> = {
   projects: "Project Board",
   analytics: "Analytics",
   notifications: "Notifications",
+  setup: "Setup Guide",
   settings: "Settings",
 };
 
@@ -186,6 +188,9 @@ export default function Home() {
               notifications={notifications}
               onUpdate={handleNotificationsUpdate}
             />
+          )}
+          {activeView === "setup" && (
+            <SetupGuide onNavigateToDesktop={() => setActiveView("desktop")} />
           )}
           {activeView === "settings" && (
             <SettingsPanel

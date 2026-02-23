@@ -27,6 +27,8 @@ import {
   ChevronUp,
   ChevronDown,
   Terminal,
+  Copy,
+  Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -88,9 +90,12 @@ const logColors: Record<string, string> = { info: "text-blue-400", warn: "text-y
 
 export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesktopViewProps) {
   // Connection state
-  const [connectionState, setConnectionState] = useState<"disconnected" | "connecting" | "connected">("disconnected");
+  const [connectionState, setConnectionState] = useState<"disconnected" | "searching" | "connecting" | "connected">("disconnected");
   const [urlInput, setUrlInput] = useState(agentUrl);
   const [errorMsg, setErrorMsg] = useState("");
+  const [showManualUrl, setShowManualUrl] = useState(false);
+  const [searchStatus, setSearchStatus] = useState("");
+  const [copied, setCopied] = useState(false);
 
   // Desktop stream
   const [frame, setFrame] = useState<string | null>(null);
@@ -112,20 +117,20 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
   const wsRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const reconnectRef = useRef<NodeJS.Timeout | null>(null);
+  const connectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const savedDisplayUrl = useRef<string>("");
+  const httpBaseUrl = useRef<string>("");
+  const searchAbortRef = useRef<AbortController | null>(null);
 
-  // Try to auto-connect if URL is saved and not the default localhost
+  // ─── Auto-connect on mount if URL is saved ──────────────────────────────────
   useEffect(() => {
     if (agentUrl && agentUrl !== "ws://localhost:9900" && agentUrl !== "wss://localhost:9900" && !agentUrl.includes("localhost")) {
-      handleConnect(agentUrl);
+      connectToUrl(agentUrl);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const connectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const savedDisplayUrl = useRef<string>("");
-  const httpBaseUrl = useRef<string>("");
-
-  // HTTP polling for frames - works reliably through Cloudflare Tunnel
+  // ─── HTTP Polling for frames ────────────────────────────────────────────────
   const doStartHttpPolling = useCallback(() => {
     if (httpPollRef.current) clearInterval(httpPollRef.current);
     const baseUrl = httpBaseUrl.current;
@@ -154,12 +159,12 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     }, 1000);
   }, []);
 
-  const handleConnect = useCallback((url?: string) => {
-    const connectUrl = url || urlInput.trim();
-    if (!connectUrl) return;
+  // ─── Connect to a specific URL ──────────────────────────────────────────────
+  const connectToUrl = useCallback((url: string) => {
+    if (!url) return;
 
     // Build the HTTPS base URL for HTTP requests
-    let baseHttpUrl = connectUrl;
+    let baseHttpUrl = url;
     if (baseHttpUrl.startsWith("wss://")) baseHttpUrl = baseHttpUrl.replace("wss://", "https://");
     else if (baseHttpUrl.startsWith("ws://")) baseHttpUrl = baseHttpUrl.replace("ws://", "http://");
     else if (!baseHttpUrl.startsWith("http://") && !baseHttpUrl.startsWith("https://")) baseHttpUrl = `https://${baseHttpUrl}`;
@@ -169,7 +174,7 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     savedDisplayUrl.current = displayUrl;
     httpBaseUrl.current = baseHttpUrl;
 
-    // Build WSS URL for WebSocket
+    // Build WSS URL
     let wsUrl = baseHttpUrl;
     if (wsUrl.startsWith("https://")) wsUrl = wsUrl.replace("https://", "wss://");
     else if (wsUrl.startsWith("http://")) wsUrl = wsUrl.replace("http://", "ws://");
@@ -184,13 +189,13 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
     if (httpPollRef.current) { clearInterval(httpPollRef.current); httpPollRef.current = null; }
 
-    // First, verify the agent is reachable via HTTP before trying WebSocket
+    // Verify agent via HTTP health check
     fetch(`${baseHttpUrl}/health`)
       .then(r => r.json())
       .then(health => {
         if (!health.status) throw new Error("Bad response");
 
-        // Agent is reachable! Now try WebSocket AND start HTTP polling simultaneously
+        // Agent is reachable!
         setConnectionState("connected");
         setErrorMsg("");
         wsFrameReceived.current = false;
@@ -199,59 +204,114 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
         // Fetch bot state
         fetch(`${baseHttpUrl}/state`).then(r => r.json()).then(data => setBotState(data)).catch(() => {});
 
-        // Start HTTP polling immediately (guaranteed to work since /health worked)
+        // Start HTTP polling immediately
         doStartHttpPolling();
         setStreamMode("http");
 
         // Also try WebSocket for faster streaming
         try {
           const ws = new WebSocket(wsUrl);
-
-          ws.onopen = () => {
-            // WS connected too - but keep HTTP polling until we get a WS frame
-          };
-
           ws.onmessage = (event) => {
             try {
               const msg = JSON.parse(event.data);
               if (msg.type === "frame" && msg.data) {
                 wsFrameReceived.current = true;
-                // WS frames working! Stop HTTP polling and switch to WS
                 if (httpPollRef.current) { clearInterval(httpPollRef.current); httpPollRef.current = null; }
                 setStreamMode("ws");
                 setFrame(msg.data);
                 frameCountRef.current++;
               }
-              if (msg.type === "state" && msg.data) {
-                setBotState(msg.data);
-              }
+              if (msg.type === "state" && msg.data) setBotState(msg.data);
             } catch { /* ignore */ }
           };
-
           ws.onclose = () => {
-            // If WS drops, fall back to HTTP polling
             if (!httpPollRef.current && httpBaseUrl.current) {
               doStartHttpPolling();
               setStreamMode("http");
             }
           };
-
-          ws.onerror = () => {
-            // WS failed, but HTTP polling is already running so that's fine
-          };
-
+          ws.onerror = () => { /* HTTP polling already running */ };
           wsRef.current = ws;
-        } catch {
-          // WebSocket creation failed, HTTP polling is already running
-        }
+        } catch { /* WebSocket failed, HTTP polling running */ }
       })
       .catch(() => {
         setConnectionState("disconnected");
-        setErrorMsg("Could not reach agent. Check the URL and make sure the agent is running on your Pi.");
+        setErrorMsg("Could not reach agent. The Pi may be offline or the tunnel URL may have changed.");
       });
-  }, [urlInput, onAgentUrlUpdate, doStartHttpPolling]);
+  }, [onAgentUrlUpdate, doStartHttpPolling]);
+
+  // ─── ONE-CLICK CONNECT: Auto-discover Pi ────────────────────────────────────
+  const handleAutoConnect = useCallback(async () => {
+    setConnectionState("searching");
+    setErrorMsg("");
+    setSearchStatus("Looking for your Pi...");
+
+    // Abort any previous search
+    if (searchAbortRef.current) searchAbortRef.current.abort();
+    const abort = new AbortController();
+    searchAbortRef.current = abort;
+
+    try {
+      // Step 1: Check if we have a saved URL that still works
+      const savedUrl = agentUrl;
+      if (savedUrl && savedUrl !== "ws://localhost:9900" && !savedUrl.includes("localhost")) {
+        setSearchStatus("Checking saved connection...");
+        try {
+          let checkUrl = savedUrl;
+          if (checkUrl.startsWith("wss://")) checkUrl = checkUrl.replace("wss://", "https://");
+          else if (checkUrl.startsWith("ws://")) checkUrl = checkUrl.replace("ws://", "http://");
+          else if (!checkUrl.startsWith("http")) checkUrl = `https://${checkUrl}`;
+          checkUrl = checkUrl.replace(/\/$/, "");
+
+          const resp = await fetch(`${checkUrl}/health`, { signal: abort.signal });
+          if (resp.ok) {
+            setSearchStatus("Found! Connecting...");
+            connectToUrl(savedUrl);
+            return;
+          }
+        } catch {
+          // Saved URL doesn't work anymore, continue to auto-discover
+        }
+      }
+
+      // Step 2: Ask the Vercel API for registered devices
+      setSearchStatus("Searching for registered devices...");
+      try {
+        const resp = await fetch("/api/device", { signal: abort.signal });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.tunnelUrl) {
+            setSearchStatus(`Found ${data.hostname || "Pi"}! Connecting...`);
+            connectToUrl(data.tunnelUrl);
+            return;
+          }
+        }
+      } catch {
+        // API not reachable or no devices
+      }
+
+      // Step 3: Nothing found
+      if (!abort.signal.aborted) {
+        setConnectionState("disconnected");
+        setErrorMsg("No Pi found. Make sure you've run the setup script on your Pi and it's powered on.");
+      }
+    } catch {
+      if (!abort.signal.aborted) {
+        setConnectionState("disconnected");
+        setErrorMsg("Search failed. Check your internet connection.");
+      }
+    }
+  }, [agentUrl, connectToUrl]);
+
+  // ─── Manual URL connect ─────────────────────────────────────────────────────
+  const handleManualConnect = useCallback(() => {
+    const url = urlInput.trim();
+    if (!url) return;
+    connectToUrl(url);
+  }, [urlInput, connectToUrl]);
 
   const disconnect = () => {
+    if (searchAbortRef.current) searchAbortRef.current.abort();
     if (reconnectRef.current) clearTimeout(reconnectRef.current);
     if (httpPollRef.current) { clearInterval(httpPollRef.current); httpPollRef.current = null; }
     if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
@@ -260,6 +320,7 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     setFrame(null);
     setBotState(defaultBotState);
     setStreamMode("ws");
+    setShowManualUrl(false);
   };
 
   const sendAction = (action: string, extra?: Record<string, unknown>) => {
@@ -268,7 +329,7 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     }
   };
 
-  // FPS counter
+  // FPS counter & cleanup
   useEffect(() => {
     const interval = setInterval(() => {
       setFps(frameCountRef.current);
@@ -298,6 +359,12 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
     return () => document.removeEventListener("fullscreenchange", handler);
   }, []);
 
+  const handleCopySetup = () => {
+    navigator.clipboard.writeText("curl -fsSL https://raw.githubusercontent.com/openclaw12/ClawDashboard/master/agent/setup-pi.sh | bash");
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   // ─── DISCONNECTED: Show Connect Screen ──────────────────────────────────────
   if (connectionState === "disconnected") {
     return (
@@ -307,56 +374,107 @@ export default function LiveDesktopView({ agentUrl, onAgentUrlUpdate }: LiveDesk
             <div className="w-20 h-20 rounded-2xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-center mx-auto mb-4">
               <Monitor className="w-10 h-10 text-blue-400" />
             </div>
-            <h2 className="text-2xl font-bold text-white mb-2">Connect to OpenClaw</h2>
+            <h2 className="text-2xl font-bold text-white mb-2">OpenClaw Live Desktop</h2>
             <p className="text-sm text-slate-400">
-              Enter your Pi&apos;s tunnel URL to see its desktop and control the bot remotely.
+              See your Pi&apos;s screen in real-time and control it remotely.
             </p>
           </div>
 
           <div className="bg-[#1e293b] rounded-xl border border-[#334155] p-6 space-y-4">
-            <div>
-              <label className="text-xs text-slate-400 mb-1.5 block">Agent URL</label>
-              <input
-                type="text"
-                placeholder="https://your-tunnel.trycloudflare.com"
-                value={urlInput === "ws://localhost:9900" ? "" : urlInput.replace(/^wss?:\/\//, "https://")}
-                onChange={(e) => setUrlInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleConnect()}
-                className="w-full bg-[#0f172a] border border-[#334155] rounded-lg px-4 py-3 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
-                autoFocus
-              />
-            </div>
-
-            {errorMsg && (
-              <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
-                <WifiOff className="w-4 h-4 text-red-400 flex-shrink-0" />
-                <span className="text-sm text-red-400">{errorMsg}</span>
-              </div>
-            )}
-
+            {/* Main Connect Button */}
             <button
-              onClick={() => handleConnect()}
-              className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"
+              onClick={handleAutoConnect}
+              className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-lg rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-blue-600/20"
             >
-              <Wifi className="w-5 h-5" />
+              <Wifi className="w-6 h-6" />
               Connect
             </button>
 
+            {errorMsg && (
+              <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+                <WifiOff className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                <div className="text-sm text-red-400">
+                  <p>{errorMsg}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Manual URL option (collapsed by default) */}
+            <div className="border-t border-[#334155] pt-3">
+              <button
+                onClick={() => setShowManualUrl(!showManualUrl)}
+                className="text-xs text-slate-500 hover:text-slate-300 transition-colors flex items-center gap-1"
+              >
+                {showManualUrl ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                Enter URL manually
+              </button>
+
+              {showManualUrl && (
+                <div className="mt-3 space-y-2 animate-fade-in">
+                  <input
+                    type="text"
+                    placeholder="https://your-tunnel.trycloudflare.com"
+                    value={urlInput === "ws://localhost:9900" ? "" : urlInput.replace(/^wss?:\/\//, "https://")}
+                    onChange={(e) => setUrlInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleManualConnect()}
+                    className="w-full bg-[#0f172a] border border-[#334155] rounded-lg px-4 py-2.5 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
+                  />
+                  <button
+                    onClick={handleManualConnect}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    <Wifi className="w-4 h-4" />
+                    Connect to URL
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* First-time setup instructions */}
             <div className="border-t border-[#334155] pt-4">
               <p className="text-xs font-medium text-slate-300 mb-2">First time? Run this on your Raspberry Pi:</p>
-              <div className="bg-[#0f172a] rounded-lg p-3 border border-[#334155]">
-                <code className="text-xs text-green-400 block whitespace-pre-wrap">
-{`git clone https://github.com/openclaw12/ClawDashboard.git
-cd ClawDashboard
-chmod +x agent/setup-pi.sh
-./agent/setup-pi.sh`}
+              <div className="bg-[#0f172a] rounded-lg p-3 border border-[#334155] relative group">
+                <code className="text-xs text-green-400 block pr-8">
+                  curl -fsSL https://raw.githubusercontent.com/openclaw12/ClawDashboard/master/agent/setup-pi.sh | bash
                 </code>
+                <button
+                  onClick={handleCopySetup}
+                  className={cn(
+                    "absolute top-2 right-2 p-1.5 rounded transition-all",
+                    copied
+                      ? "bg-green-500/20 text-green-400"
+                      : "bg-[#334155]/50 text-slate-400 hover:text-white opacity-0 group-hover:opacity-100"
+                  )}
+                >
+                  {copied ? <CheckCircle className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                </button>
               </div>
               <p className="text-xs text-slate-500 mt-2">
-                This installs everything and auto-starts on boot. It will print a URL - paste that above.
+                Installs everything automatically. After setup, just press Connect above.
               </p>
             </div>
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── SEARCHING: Auto-discovery in progress ──────────────────────────────────
+  if (connectionState === "searching") {
+    return (
+      <div className="animate-fade-in flex items-center justify-center min-h-[calc(100vh-8rem)]">
+        <div className="text-center">
+          <div className="relative mx-auto mb-6 w-16 h-16">
+            <Search className="w-16 h-16 text-blue-400/30" />
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+            </div>
+          </div>
+          <h2 className="text-lg font-semibold text-white mb-2">{searchStatus}</h2>
+          <p className="text-sm text-slate-400 mb-4">This usually takes a few seconds</p>
+          <button onClick={disconnect} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">
+            Cancel
+          </button>
         </div>
       </div>
     );
