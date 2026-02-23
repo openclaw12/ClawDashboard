@@ -1,0 +1,17 @@
+[Unit]
+Description=ClawBot Desktop Agent
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/%i/.Xauthority
+WorkingDirectory=/home/%i/ClawDashboard
+ExecStart=/usr/bin/node /home/%i/ClawDashboard/agent/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

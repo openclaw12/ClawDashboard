@@ -148,14 +148,15 @@ export default function SettingsPanel({ integrations, onUpdate, agentUrl, onAgen
           )}
 
           <div className="bg-[#0f172a] rounded-lg p-3 border border-[#334155]">
-            <p className="text-xs font-medium text-slate-300 mb-2">Quick Setup (Raspberry Pi)</p>
+            <p className="text-xs font-medium text-slate-300 mb-2">Quick Setup (Raspberry Pi) — One Command!</p>
             <ol className="text-xs text-slate-400 space-y-1 list-decimal list-inside">
-              <li>Clone the repo on your Pi: <code className="bg-[#1e293b] px-1.5 py-0.5 rounded">git clone https://github.com/openclaw12/ClawDashboard.git</code></li>
-              <li>Run setup: <code className="bg-[#1e293b] px-1.5 py-0.5 rounded">chmod +x agent/setup-pi.sh && ./agent/setup-pi.sh</code></li>
-              <li>Start agent: <code className="bg-[#1e293b] px-1.5 py-0.5 rounded">node agent/server.js</code></li>
-              <li>Start tunnel: <code className="bg-[#1e293b] px-1.5 py-0.5 rounded">cloudflared tunnel --url http://localhost:9900</code></li>
-              <li>Copy the tunnel URL and paste it above</li>
+              <li>On your Pi, run: <code className="bg-[#1e293b] px-1.5 py-0.5 rounded text-blue-300">curl -fsSL https://raw.githubusercontent.com/openclaw12/ClawDashboard/master/agent/setup-pi.sh | bash</code></li>
+              <li>Copy the tunnel URL printed at the end</li>
+              <li>Paste it above and click Save</li>
             </ol>
+            <p className="text-xs text-slate-500 mt-2">
+              That&apos;s it! The agent and tunnel auto-start on boot. You&apos;ll never need to touch the Pi again.
+            </p>
           </div>
         </div>
       </div>

@@ -1,0 +1,17 @@
+[Unit]
+Description=ClawBot Cloudflare Tunnel
+After=network-online.target clawbot-agent.service
+Wants=network-online.target
+Requires=clawbot-agent.service
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/usr/bin/cloudflared tunnel --url http://localhost:9900 --no-autoupdate
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

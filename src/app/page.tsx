@@ -12,7 +12,6 @@ import AnalyticsDashboard from "@/components/AnalyticsDashboard";
 import NotificationsPanel from "@/components/NotificationsPanel";
 import SettingsPanel from "@/components/SettingsPanel";
 import LiveDesktopView from "@/components/LiveDesktopView";
-import BotControlPanel from "@/components/BotControlPanel";
 import {
   getDefaultTasks,
   getDefaultEvents,
@@ -54,7 +53,6 @@ function saveAgentUrl(url: string) {
 const viewTitles: Record<string, string> = {
   dashboard: "Dashboard",
   desktop: "Live Desktop",
-  botcontrol: "Bot Control",
   tasks: "Task Manager",
   calendar: "Calendar",
   messages: "Communications",
@@ -166,10 +164,7 @@ export default function Home() {
             />
           )}
           {activeView === "desktop" && (
-            <LiveDesktopView agentUrl={agentUrl} />
-          )}
-          {activeView === "botcontrol" && (
-            <BotControlPanel agentUrl={agentUrl} />
+            <LiveDesktopView agentUrl={agentUrl} onAgentUrlUpdate={handleAgentUrlUpdate} />
           )}
           {activeView === "tasks" && (
             <TaskManager tasks={tasks} onUpdate={handleTasksUpdate} />
